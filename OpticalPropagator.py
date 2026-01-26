@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
+import cv2
 
 
 class OpticalPropagator(nn.Module):
@@ -27,7 +28,7 @@ class OpticalPropagator(nn.Module):
 
         # 如果没有输入光场，使用平面波
         if input_field is None:
-            input_field = torch.ones(batch, H, W, dtype=torch.complex64)
+            input_field = torch.ones(batch, H, W, dtype=torch.complex64, device=phase_slm.device)
 
         # 应用SLM相位调制
         modulated_field = input_field * torch.exp(1j * phase_slm)
@@ -35,11 +36,20 @@ class OpticalPropagator(nn.Module):
         # 角谱法传播
         fx = torch.fft.fftfreq(W, d=self.pixel_size).to(phase_slm.device)
         fy = torch.fft.fftfreq(H, d=self.pixel_size).to(phase_slm.device)
-        FX, FY = torch.meshgrid(fx, fy, indexing='xy')
+
+        # 创建网格 - 兼容旧版本PyTorch的方法
+        FX, FY = torch.meshgrid(fx, fy)
+        # 转置以匹配 'xy' 索引
+        FX = FX.t()
+        FY = FY.t()
 
         # 传递函数
-        H_transfer = torch.exp(1j * self.distance *
-                               torch.sqrt(self.k ** 2 - (2 * np.pi * FX) ** 2 - (2 * np.pi * FY) ** 2))
+        k_squared = self.k ** 2
+        freq_term = (2 * np.pi * FX) ** 2 + (2 * np.pi * FY) ** 2
+
+        # 避免根号内出现负数
+        sqrt_term = torch.sqrt(torch.relu(k_squared - freq_term))
+        H_transfer = torch.exp(1j * self.distance * sqrt_term)
 
         # 傅里叶变换
         field_ft = torch.fft.fft2(modulated_field)
@@ -76,9 +86,16 @@ class SLM_PhaseNet(nn.Module):
             nn.MaxPool2d(2),
         )
 
+        # 操作类型编码器
+        self.op_encoder = nn.Sequential(
+            nn.Linear(5, 32),
+            nn.ReLU(),
+            nn.Linear(32, 64 * 64),  # 输出大小为64x64，匹配编码器输出特征图大小
+        )
+
         # 瓶颈层（处理类型编码）
         self.bottleneck = nn.Sequential(
-            nn.Conv2d(256 + 5, 512, 3, padding=1),  # +5 for operation type
+            nn.Conv2d(256 + 5, 512, 3, padding=1),
             nn.ReLU(),
             nn.Conv2d(512, 512, 3, padding=1),
             nn.ReLU(),
@@ -86,11 +103,11 @@ class SLM_PhaseNet(nn.Module):
 
         # 解码器（上采样到SLM分辨率）
         self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             nn.Conv2d(512, 256, 3, padding=1),
             nn.ReLU(),
 
-            nn.Upsample(scale_factor=2, mode='bilinear'),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             nn.Conv2d(256, 128, 3, padding=1),
             nn.ReLU(),
 
@@ -98,13 +115,6 @@ class SLM_PhaseNet(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, output_channels, 1),
             nn.Tanh(),  # 输出范围[-1, 1]，对应相位[-π, π]
-        )
-
-        # 操作类型编码器
-        self.op_encoder = nn.Sequential(
-            nn.Linear(5, 32),
-            nn.ReLU(),
-            nn.Linear(32, slm_res[0] // 4 * slm_res[1] // 4),
         )
 
     def forward(self, x, operation_type):
@@ -117,76 +127,67 @@ class SLM_PhaseNet(nn.Module):
 
         # 编码操作类型并广播到空间维度
         op_feat = self.op_encoder(operation_type)
-        op_feat = op_feat.view(feat.shape[0], 1, feat.shape[2], feat.shape[3])
+
+        # 获取特征图的空间维度
+        batch_size, channels, H_feat, W_feat = feat.shape
+
+        # 重塑操作类型特征以匹配特征图的空间维度
+        op_feat = op_feat.view(batch_size, 1, H_feat, W_feat)
         op_feat = op_feat.expand(-1, 5, -1, -1)  # 扩展到5个通道
 
         # 拼接特征
         combined = torch.cat([feat, op_feat], dim=1)
 
+        # 通过瓶颈层
+        bottleneck_out = self.bottleneck(combined)
+
         # 解码为相位图
-        phase = self.decoder(combined) * np.pi  # 缩放回[-π, π]
+        phase = self.decoder(bottleneck_out) * np.pi  # 缩放回[-π, π]
 
         return phase
 
 
-class ImageProcessingDataset(Dataset):
+def combine_phase_maps(phase_tensor, method='mean', filename='phase_map_combined.png'):
     """
-    数据集：输入图像 + 目标处理结果
+    将多个相位通道组合成单一相位图
     """
+    phase_np = phase_tensor.detach().cpu().numpy()
 
-    def __init__(self, image_paths, transform=None):
-        self.image_paths = image_paths
-        self.transform = transform
-
-        # 定义处理操作
-        self.operations = ['sharpen', 'edge', 'blur', 'laplacian', 'gaussian']
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        # 加载图像
-        img = cv2.imread(self.image_paths[idx])
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img = cv2.resize(img, (256, 256))
-        img = img.astype(np.float32) / 255.0
-
-        # 随机选择一种处理操作
-        op_idx = np.random.randint(0, len(self.operations))
-        op_type = self.operations[op_idx]
-
-        # 生成目标处理结果
-        target = self.apply_operation(img, op_type)
-
-        # 转换为张量
-        img_tensor = torch.FloatTensor(img).unsqueeze(0)  # [1, H, W]
-        target_tensor = torch.FloatTensor(target).unsqueeze(0)
-
-        # 操作类型one-hot编码
-        op_onehot = torch.zeros(len(self.operations))
-        op_onehot[op_idx] = 1
-
-        return img_tensor, target_tensor, op_onehot
-
-    def apply_operation(self, img, operation):
-        """应用数字图像处理操作"""
-        if operation == 'sharpen':
-            kernel = np.array([[0, -1, 0],
-                               [-1, 5, -1],
-                               [0, -1, 0]])
-            result = cv2.filter2D(img, -1, kernel)
-        elif operation == 'edge':
-            result = cv2.Laplacian(img, cv2.CV_32F)
-        elif operation == 'blur':
-            result = cv2.GaussianBlur(img, (5, 5), 0)
-        elif operation == 'laplacian':
-            result = cv2.Laplacian(img, cv2.CV_32F)
-        elif operation == 'gaussian':
-            result = cv2.GaussianBlur(img, (5, 5), 1.0)
+    if phase_np.ndim == 3:
+        if method == 'mean':
+            # 取平均值
+            combined = np.mean(phase_np, axis=0)
+        elif method == 'first':
+            # 取第一个通道
+            combined = phase_np[0]
+        elif method == 'sum':
+            # 求和
+            combined = np.sum(phase_np, axis=0)
+        elif method == 'principal':
+            # 取主相位（幅度最大）
+            # 假设前两个通道是实部和虚部
+            if phase_np.shape[0] >= 2:
+                real = phase_np[0]
+                imag = phase_np[1]
+                combined = np.arctan2(imag, real)
+            else:
+                combined = phase_np[0]
         else:
-            result = img.copy()
+            combined = phase_np[0]
 
-        return np.clip(result, 0, 1)
+        # 归一化到 [0, 255]
+        phase_norm = ((combined + np.pi) / (2 * np.pi) * 255).astype(np.uint8)
+
+        # 保存
+        cv2.imwrite(filename, phase_norm)
+        print(f"Combined phase map ({method}) saved as '{filename}'")
+
+        return combined
+    else:
+        print(f"Cannot combine phase from shape {phase_np.shape}")
+        return None
+
+
 
 
 def train_neural_phase_optimizer():
@@ -195,7 +196,7 @@ def train_neural_phase_optimizer():
     """
     # 初始化
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+    print("使用设备：", device)
     # 模型
     phase_net = SLM_PhaseNet().to(device)
     propagator = OpticalPropagator().to(device)
@@ -208,7 +209,7 @@ def train_neural_phase_optimizer():
     phase_smooth_loss = nn.L1Loss()
 
     # 训练循环
-    for epoch in range(100):
+    for epoch in range(11):
         # 这里简化了数据加载，实际需要真实数据集
         batch_size = 4
         dummy_images = torch.randn(batch_size, 1, 256, 256).to(device)
@@ -218,15 +219,20 @@ def train_neural_phase_optimizer():
         # 生成相位图
         phase_maps = phase_net(dummy_images, dummy_ops)
 
+        # 去除通道维度，从 [batch, 1, H, W] 变为 [batch, H, W]
+        phase_maps_2d = phase_maps.squeeze(1)
+
         # 光学传播
-        output_fields = propagator(phase_maps)
+        output_fields = propagator(phase_maps_2d)
         output_intensity = torch.abs(output_fields) ** 2
 
         # 计算损失
         intensity_loss = mse_loss(output_intensity, dummy_targets)
+
+        # 计算平滑损失时也使用去除通道维度的相位图
         smooth_loss = phase_smooth_loss(
-            phase_maps[:, :, 1:, :] - phase_maps[:, :, :-1, :],
-            torch.zeros_like(phase_maps[:, :, 1:, :])
+            phase_maps_2d[:, 1:, :] - phase_maps_2d[:, :-1, :],
+            torch.zeros_like(phase_maps_2d[:, 1:, :])
         )
 
         total_loss = intensity_loss + 0.1 * smooth_loss
@@ -235,13 +241,19 @@ def train_neural_phase_optimizer():
         optimizer.zero_grad()
         total_loss.backward()
         optimizer.step()
-
         if epoch % 10 == 0:
             print(f"Epoch {epoch}, Loss: {total_loss.item():.4f}")
+            # 显示结果
+            phase_map_np = phase_maps_2d.detach().cpu().numpy()
+            print(f"phase_map_np shape: {phase_map_np.shape}")  # 添加这行
+            # 保存相位图
+            # 使用
+            combined_phase = combine_phase_maps(phase_maps_2d, method='mean')
 
     return phase_net
 
 
 # 训练神经网络相位优化器
 print("训练神经网络相位优化器...")
-# phase_net = train_neural_phase_optimizer()
+phase_net = train_neural_phase_optimizer()
+print(phase_net)

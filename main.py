@@ -12,7 +12,7 @@ os.makedirs(output_dir, exist_ok=True)
 image = cv2.imread('./images/zidane.jpg')  # 请替换为您的图像路径
 if image is None:
     # 如果没找到图像，创建一个示例图像
-    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    image = np.zeros((640, 640, 3), dtype=np.uint8)
     cv2.rectangle(image, (50, 50), (150, 150), (255, 255, 255), -1)
     cv2.circle(image, (100, 100), 30, (0, 0, 255), -1)
 
