@@ -4,14 +4,14 @@ import matplotlib.pyplot as plt
 from scipy.fft import fft2, fftshift, ifft2, ifftshift
 
 # 定义保存目录
-save_dir = "SLM_imageProcessor_test"
+save_dir = "SLM_imageProcessor_test_768x768"
 # 确保目录存在
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
 
 class SLM_ImageProcessor:
-    def __init__(self, slm_resolution=(1920, 1080), wavelength=532e-9, pixel_size=8e-6):
+    def __init__(self, slm_resolution=(768, 768), wavelength=532e-9, pixel_size=8e-6):
         """
         初始化SLM图像处理器
         型号：FSLM-2K70-P02HR
@@ -157,6 +157,7 @@ class SLM_ImageProcessor:
 
         # 3. 获取卷积核
         kernel_phase, kernel = self.generate_kernel_phase(operation)
+        print(kernel.shape)
 
         # 4. 模拟4f系统的光学卷积
         # 4.1 输入图像傅里叶变换
@@ -182,6 +183,7 @@ class SLM_ImageProcessor:
             # 保存相位图
             phase_filename = f"image_{operation}_phase.bmp"
             self.save_phase_as_image(phase_map, phase_filename)
+            # self.save_phase_as_image(kernel,"kerneltestimage.bmp")
 
             # 保存原始图像和处理后的图像
             original_filename = f"original_{os.path.basename(image_path).split('.')[0]}.png"
@@ -497,15 +499,15 @@ class SLM_CommonGenerate():
     slm = SLM_ImageProcessor()
 
     # 使用SLM_Image_shift处理图像
-    print("\n6. 使用SLM_Image_shift处理图像...")
-    image_processor = SLM_Image_shift('images/zidane.jpg')
+    print("使用SLM_Image_shift处理图像...")
+    image_processor = SLM_Image_shift('images/004355.jpg')
 
     # 处理单个操作
-    # print("处理操作...")
-    # sharpen_phase, sharpen_image = image_processor.process_image('edge_sobel_y')
+    print("处理操作...")
+    sharpen_phase, sharpen_image = image_processor.process_image('edge_sobel_y')
 
     # 或者演示所有操作
-    image_processor.demo_all_operations()
+    # image_processor.demo_all_operations()
 
     # print("生成菲涅尔透镜相位图...")
     # sharpen_phase = slm.generate_fresnel_lens(0.5)
