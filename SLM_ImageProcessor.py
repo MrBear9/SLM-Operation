@@ -1,10 +1,20 @@
+"""
+@Project ：SLMOperation core
+@File    ：SLM_ImageProcessor.py
+@IDE     ：PyCharm
+@Author  ：聿熊
+@Github  ：https://github.com/MrBear9
+@Date    ：2026/2/3 11:01
+"""
+
+
 import numpy as np
-import cv2,os
+import cv2, os
 import matplotlib.pyplot as plt
 from scipy.fft import fft2, fftshift, ifft2, ifftshift
 
 # 定义保存目录
-save_dir = "SLM_imageProcessor_test_768x768"
+save_dir = "SLM_imageProcessor_test_768x768_test"
 # 确保目录存在
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
@@ -34,9 +44,13 @@ class SLM_ImageProcessor:
         self.fy = np.fft.fftfreq(self.slm_height, d=pixel_size)
         self.FX, self.FY = np.meshgrid(self.fx, self.fy)
 
-    def generate_kernel_phase(self, kernel_type='sharpen'):
+    def generate_kernel_phase(self, kernel_type='sharpen', save_kernel=True):
         """
         生成常见卷积核的相位图
+
+        参数:
+            kernel_type: 卷积核类型
+            save_kernel: 是否保存kernel_padded
         """
         kernels = {
             'sharpen': np.array([[0, -1, 0],
@@ -68,6 +82,10 @@ class SLM_ImageProcessor:
         start_w = self.slm_width // 2 - kw // 2
         kernel_padded[start_h:start_h + kh, start_w:start_w + kw] = kernel
 
+        # 保存kernel_padded为txt和可视化文件
+        if save_kernel:
+            self.save_kernel_padded(kernel_padded, kernel, kernel_type, start_h, start_w, kh, kw)
+
         # 计算傅里叶变换（滤波器函数）
         kernel_ft = fftshift(fft2(ifftshift(kernel_padded)))
 
@@ -78,7 +96,112 @@ class SLM_ImageProcessor:
         # 归一化到0-2π范围
         phase_map = (phase_filter - np.min(phase_filter)) % (2 * np.pi)
 
-        return phase_map, kernel_padded
+        return phase_map, kernel_padded, kernel_ft
+
+    def save_kernel_padded(self, kernel_padded, original_kernel, kernel_type, start_h, start_w, kh, kw):
+        """
+        保存kernel_padded为txt和可视化文件
+        """
+        # 保存kernel_padded为txt文件
+        txt_filename = f"kernel_padded_{kernel_type}.txt"
+        txt_path = os.path.join(save_dir, txt_filename)
+
+        # 保存为文本文件，格式化为6位小数
+        np.savetxt(txt_path, kernel_padded, fmt='%.6f')
+        print(f"Kernel padded saved as txt: {txt_filename}")
+
+        # 保存原始核信息
+        info_filename = f"kernel_info_{kernel_type}.txt"
+        info_path = os.path.join(save_dir, info_filename)
+
+        with open(info_path, 'w') as f:
+            f.write(f"Kernel type: {kernel_type}\n")
+            f.write(f"Original kernel shape: {original_kernel.shape}\n")
+            f.write(f"Original kernel values:\n")
+            for row in original_kernel:
+                f.write(' '.join([f'{val:8.6f}' for val in row]) + '\n')
+            f.write(f"\nSLM resolution: {self.slm_width}x{self.slm_height}\n")
+            f.write(f"Padded kernel shape: {kernel_padded.shape}\n")
+            f.write(f"Start position (h,w): ({start_h}, {start_w})\n")
+            f.write(f"Original kernel region: [{start_h}:{start_h + kh}, {start_w}:{start_w + kw}]\n")
+
+        print(f"Kernel info saved: {info_filename}")
+
+        # 可视化kernel_padded
+        self.visualize_kernel_padded(kernel_padded, original_kernel, kernel_type)
+
+    def visualize_kernel_padded(self, kernel_padded, original_kernel, kernel_type):
+        """
+        可视化kernel_padded
+        """
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+        # 原始核
+        im1 = axes[0].imshow(original_kernel, cmap='viridis', interpolation='none')
+        axes[0].set_title(f'Original Kernel: {kernel_type}\nShape: {original_kernel.shape}')
+        axes[0].set_xlabel('Width')
+        axes[0].set_ylabel('Height')
+        plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+
+        # 在原始核上标注数值
+        for i in range(original_kernel.shape[0]):
+            for j in range(original_kernel.shape[1]):
+                axes[0].text(j, i, f'{original_kernel[i, j]:.3f}',
+                             ha='center', va='center',
+                             color='white', fontsize=8 if original_kernel.shape[0] <= 5 else 6)
+
+        # kernel_padded完整图
+        im2 = axes[1].imshow(kernel_padded, cmap='viridis')
+        axes[1].set_title(f'Kernel Padded\n{self.slm_width}x{self.slm_height}')
+        axes[1].set_xlabel('Width')
+        axes[1].set_ylabel('Height')
+        plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+
+        # kernel_padded局部放大图
+        kh, kw = original_kernel.shape
+        start_h = self.slm_height // 2 - kh // 2
+        start_w = self.slm_width // 2 - kw // 2
+
+        # 提取局部区域，扩大一些以显示上下文
+        pad_h = 2
+        pad_w = 2
+        region = kernel_padded[max(0, start_h - pad_h):min(self.slm_height, start_h + kh + pad_h),
+                 max(0, start_w - pad_w):min(self.slm_width, start_w + kw + pad_w)]
+
+        im3 = axes[2].imshow(region, cmap='viridis')
+        axes[2].set_title(f'Kernel Padded (Local Region)\n[{start_h}:{start_h + kh}, {start_w}:{start_w + kw}]')
+        axes[2].set_xlabel('Width')
+        axes[2].set_ylabel('Height')
+        plt.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04)
+
+        # 在局部图上标注数值
+        region_h, region_w = region.shape
+        for i in range(region_h):
+            for j in range(region_w):
+                # 计算在原始kernel_padded中的位置
+                global_i = max(0, start_h - pad_h) + i
+                global_j = max(0, start_w - pad_w) + j
+
+                # 检查是否在原始核区域内
+                in_kernel_region = (start_h <= global_i < start_h + kh and
+                                    start_w <= global_j < start_w + kw)
+
+                # 显示数值，原始核区域用白色，其他用黑色
+                color = 'white' if in_kernel_region else 'black'
+                axes[2].text(j, i, f'{region[i, j]:.3f}',
+                             ha='center', va='center',
+                             color=color, fontsize=6)
+
+        plt.tight_layout()
+
+        # 保存图像
+        img_filename = f"kernel_visualization_{kernel_type}.png"
+        img_path = os.path.join(save_dir, img_filename)
+        plt.savefig(img_path, dpi=150, bbox_inches='tight')
+        print(f"Kernel visualization saved: {img_filename}")
+
+        # 显示图像
+        plt.show()
 
     def load_image(self, image_path):
         """
@@ -156,8 +279,9 @@ class SLM_ImageProcessor:
         image_resized = cv2.resize(image_gray, (self.slm_width, self.slm_height))
 
         # 3. 获取卷积核
-        kernel_phase, kernel = self.generate_kernel_phase(operation)
-        print(kernel.shape)
+        kernel_phase, kernel, kernel_ft = self.generate_kernel_phase(operation)
+        print(f"Kernel shape: {kernel.shape}")
+        # 保存kernel_padded为txt和可视化文件
 
         # 4. 模拟4f系统的光学卷积
         # 4.1 输入图像傅里叶变换
@@ -165,7 +289,10 @@ class SLM_ImageProcessor:
 
         # 4.2 应用相位滤波器（模拟SLM在傅里叶平面调制）
         # 注意：在纯相位调制中，我们只改变相位，保持振幅不变
-        filtered_ft = image_ft * np.exp(1j * kernel_phase)
+        # filtered_ft = image_ft * np.exp(1j * kernel_phase)
+        print(f"type(image_ft): {type(image_ft)}")
+        print(f"type(kernel_ft): {type(kernel_ft)}")
+        filtered_ft = image_ft * kernel_ft  # 直接乘积 G*H
 
         # 4.3 逆傅里叶变换得到输出图像
         output_image = np.abs(ifft2(ifftshift(filtered_ft)))
@@ -183,11 +310,15 @@ class SLM_ImageProcessor:
             # 保存相位图
             phase_filename = f"image_{operation}_phase.bmp"
             self.save_phase_as_image(phase_map, phase_filename)
-            # self.save_phase_as_image(kernel,"kerneltestimage.bmp")
 
             # 保存原始图像和处理后的图像
-            original_filename = f"original_{os.path.basename(image_path).split('.')[0]}.png"
-            processed_filename = f"processed_{operation}_{os.path.basename(image_path).split('.')[0]}.png"
+            if isinstance(image_path, str):
+                image_name = os.path.basename(image_path).split('.')[0]
+            else:
+                image_name = "numpy_array"
+
+            original_filename = f"original_{image_name}.png"
+            processed_filename = f"processed_{operation}_{image_name}.png"
 
             cv2.imwrite(os.path.join(save_dir, original_filename), image_resized)
             cv2.imwrite(os.path.join(save_dir, processed_filename), output_image)
@@ -195,42 +326,42 @@ class SLM_ImageProcessor:
             print(f"原始图像保存为: {original_filename}")
             print(f"处理后的图像保存为: {processed_filename}")
 
-        # if show_result:
-        #     # 显示结果对比
-        #     self._display_image_comparison(image_resized, output_image, operation)
+        if show_result:
+            # 显示结果对比
+            self._display_image_comparison(image_resized, output_image, operation)
 
         return phase_map, output_image
 
-    # def _display_image_comparison(self, original, processed, operation):
-    #     """
-    #     显示原始图像和处理后图像的对比
-    #
-    #     参数:
-    #         original: 原始图像
-    #         processed: 处理后的图像
-    #         operation: 操作名称
-    #     """
-    #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    #
-    #     # 显示原始图像
-    #     axes[0].imshow(original, cmap='gray')
-    #     axes[0].set_title('Original Image')
-    #     axes[0].axis('off')
-    #
-    #     # 显示处理后的图像
-    #     axes[1].imshow(processed, cmap='gray')
-    #     axes[1].set_title(f'After {operation} Filter')
-    #     axes[1].axis('off')
-    #
-    #     # 显示相位图（可选）
-    #     # 获取相位图
-    #     kernel_phase, _ = self.generate_kernel_phase(operation)
-    #     axes[2].imshow(kernel_phase, cmap='hsv')
-    #     axes[2].set_title(f'{operation} Phase Map')
-    #     axes[2].axis('off')
-    #
-    #     plt.tight_layout()
-    #     plt.show()
+    def _display_image_comparison(self, original, processed, operation):
+        """
+        显示原始图像和处理后图像的对比
+
+        参数:
+            original: 原始图像
+            processed: 处理后的图像
+            operation: 操作名称
+        """
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+        # 显示原始图像
+        axes[0].imshow(original, cmap='gray')
+        axes[0].set_title('Original Image')
+        axes[0].axis('off')
+
+        # 显示处理后的图像
+        axes[1].imshow(processed, cmap='gray')
+        axes[1].set_title(f'After {operation} Filter')
+        axes[1].axis('off')
+
+        # 显示相位图（可选）
+        # 获取相位图
+        kernel_phase, _, _ = self.generate_kernel_phase(operation)
+        axes[2].imshow(kernel_phase, cmap='hsv')
+        axes[2].set_title(f'{operation} Phase Map')
+        axes[2].axis('off')
+
+        plt.tight_layout()
+        plt.show()
 
     def generate_blazed_grating(self, period=100, direction='x'):
         """
@@ -466,9 +597,6 @@ class SLM_Image_shift():
         # 可视化相位图
         self.slm.visualize_phase_map(phase_map, f"{operation} Filter Phase Map")
 
-        # # 保存相位图
-        # self.slm.save_phase_as_image(phase_map, f"{operation}_phase.bmp")
-
         return phase_map, processed_image
 
     def demo_all_operations(self):
@@ -494,6 +622,7 @@ class SLM_Image_shift():
         print("\n所有操作完成!")
         return results
 
+
 class SLM_CommonGenerate():
     # 初始化SLM处理器
     slm = SLM_ImageProcessor()
@@ -504,7 +633,7 @@ class SLM_CommonGenerate():
 
     # 处理单个操作
     print("处理操作...")
-    sharpen_phase, sharpen_image = image_processor.process_image('edge_sobel_y')
+    sharpen_phase, sharpen_image = image_processor.process_image('edge_sobel_x')
 
     # 或者演示所有操作
     # image_processor.demo_all_operations()

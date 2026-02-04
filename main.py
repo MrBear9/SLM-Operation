@@ -5,16 +5,17 @@ from scipy import ndimage
 import os
 
 # 创建保存图片的目录
-output_dir = './images_kernels/'
+output_dir = './images_kernels_768x768/'
 os.makedirs(output_dir, exist_ok=True)
 
 # 读取图像
-image = cv2.imread('./images/zidane.jpg')  # 请替换为您的图像路径
+image = cv2.imread('./images/004355.jpg')  # 请替换为您的图像路径
 if image is None:
     # 如果没找到图像，创建一个示例图像
     image = np.zeros((640, 640, 3), dtype=np.uint8)
     cv2.rectangle(image, (50, 50), (150, 150), (255, 255, 255), -1)
     cv2.circle(image, (100, 100), 30, (0, 0, 255), -1)
+image = cv2.resize(image, (768, 768))
 
 # 转换为灰度图并保存
 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
